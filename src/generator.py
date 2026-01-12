@@ -7,6 +7,9 @@ import os, json
 from typing import List
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
+from data_loader import KodCodeDataset
+from evaluators.evaluator import KodCodeEvaluator
+from utils import save_jsonl
 
 from multiprocessing import Pool
 from functools import partial
@@ -58,6 +61,18 @@ def build_prompt_codellama(question, test_info):
     
 
 def build_prompt(question, test_info, model_type=None):
+#     prompt = "Solve the following problem with the provided function header without explanations.\n"
+#     prompt += "Question: " + question.strip() + "\n\n"
+    
+#     prompt += "Function Header:\n```\n"
+#     function_declaration = test_info['function_declaration']
+#     prompt += f"{function_declaration}\n```\n"
+    
+#     prompt += "Please place the solution in the following format:\n```python\n"
+#     prompt += "# your solution code here\n```\n"
+#     prompt += "```python\n"
+    
+#     prompt += f"{function_declaration}\n"
     if model_type == "Deepseek":
         return build_prompt_deepseek(question, test_info)
     elif model_type == "Qwen":
@@ -72,6 +87,22 @@ def build_prompt(question, test_info, model_type=None):
         prompt += "```python\n"
     
     return prompt
+
+def post_process_instruct(code):
+    
+    for tok in ["<|text|>", "<|code|>", "<|execution|>", "<|assistant|>", "<|user|>", "<|endofblock|>", "<|endofmessage|>"]:
+        code = code.replace(tok, '')
+        
+    try:
+        if code.count('```') % 2 == 1:
+            code = code[:code.rfind('```')]
+        else:
+            code = code[code.find('```') + 3:]
+            code = code[code.find('\n') + 1:]
+    except:
+        pass
+    
+    return code.strip()
 
 def post_process(code, test_info):
     try:
@@ -104,12 +135,22 @@ def remove_prompt_function_declaration(prompt, function_declaration):
     
     return prompt
 
+def evaluate_single(args):
+    completion, test_code = args
+    kodcode_evaluator = KodCodeEvaluator()
+    
+    try:
+        return kodcode_evaluator.evaluate(completion, test_code)
+    except Exception as e:
+        return False
+
 class CodeGenerator:
     
-    def __init__(self, model_path, lora_path=None, tensor_parallel_size=1, max_tokens=512, temperature=0.2, top_p=0.95, gpu_memory_utilization=0.6, max_model_len=4096):
+    def __init__(self, model_path, lora_path=None, tensor_parallel_size=1, max_tokens=512, temperature=0.2, top_p=0.95, top_k=50, gpu_memory_utilization=0.6, max_model_len=4096):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.top_p = top_p
+        self.top_k = top_k
         
         self.llm = LLM(
             model=model_path,
@@ -119,7 +160,13 @@ class CodeGenerator:
             enable_lora=True, 
             max_loras=8,
             max_lora_rank=64,
-            # max_model_len=max_model_len,
+
+            # enable_prefix_caching=False,
+            # enable_chunked_prefill=False,
+            # enforce_eager=True,
+            # block_size=128
+            
+            max_model_len=max_model_len
             # enforce_eager=True
         )
         
@@ -131,13 +178,31 @@ class CodeGenerator:
         else:
             print("No LoRA adapter loaded. Running base model.")
         
+    def update_lora(self, lora_path):
+        safe_path = os.path.join(lora_path, "adapter_model.safetensors")
+        if not os.path.exists(safe_path):
+            print(f"LoRA adapter bin file not found at {safe_path}.")
+            return
+        
+        lora_name = "current_active_adapter"
+        lora_id = 1
+        
+        self.lora_request = LoRARequest(
+            lora_name=lora_name,
+            lora_int_id=lora_id,
+            lora_local_path=lora_path
+        )
+        
     def generate(self, prompts, num_candidates=1):
         
         sampling_params = SamplingParams(
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             top_p=self.top_p,
-            stop=['<|endofblock|>', '<|endofmessage|>']
+            top_k=self.top_k,
+            stop=['<|endofblock|>', 
+                  '<|endofmessage|>',
+                 '```']
         )
         
         expanded_prompts = []
