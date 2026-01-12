@@ -73,22 +73,6 @@ def build_prompt(question, test_info, model_type=None):
     
     return prompt
 
-def post_process_instruct(code):
-    
-    for tok in ["<|text|>", "<|code|>", "<|execution|>", "<|assistant|>", "<|user|>", "<|endofblock|>", "<|endofmessage|>"]:
-        code = code.replace(tok, '')
-        
-    try:
-        if code.count('```') % 2 == 1:
-            code = code[:code.rfind('```')]
-        else:
-            code = code[code.find('```') + 3:]
-            code = code[code.find('\n') + 1:]
-    except:
-        pass
-    
-    return code.strip()
-
 def post_process(code, test_info):
     try:
         if code.count('```') % 2 == 1:
